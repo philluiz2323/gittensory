@@ -49,6 +49,10 @@
 
 - Refresh Gittensor-aligned homepage
 
+- Add deterministic base-agent orchestrator
+
+- Add optional workers ai summaries
+
 
 
 ### Fixes

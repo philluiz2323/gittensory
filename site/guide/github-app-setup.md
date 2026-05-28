@@ -7,7 +7,7 @@ The GitHub App is the maintainer surface. GitHub OAuth is the MCP user-auth surf
 | Field | Value |
 | --- | --- |
 | Homepage URL | `https://gittensory.aethereal.dev` |
-| Webhook URL | your Gittensory API origin plus `/v1/github/webhook` |
+| Webhook URL | `https://api.gittensory.aethereal.dev/v1/github/webhook` |
 | Webhook active | Enabled |
 | SSL verification | Enabled |
 | Install target | Current account or selected organizations |
@@ -27,6 +27,7 @@ Subscribe to:
 
 - Pull request
 - Issues
+- Issue comment
 - Repository
 
 If GitHub shows `Installation target`, select it. Some installation-related events are hidden in parts of GitHub’s UI; Gittensory health should not fail on event names that are not selectable.
@@ -42,6 +43,19 @@ Gittensory inspects PR webhooks quietly first. It publishes a public surface onl
 
 Check runs default to off. If enabled later, they stay minimal and do not include private reviewability, scoring, wallet, hotkey, or reward/risk context.
 
+## Mention Commands
+
+`Issue comment` events let maintainers and authorized PR authors invoke Gittensory explicitly:
+
+- `@gittensory help`
+- `@gittensory preflight`
+- `@gittensory blockers`
+- `@gittensory duplicate-check`
+- `@gittensory miner-context`
+- `@gittensory next-action`
+
+Replies are public-safe. Private scoreability, reward/risk, wallet, hotkey, raw trust, and maintainer-only reviewability context stay in authenticated MCP/API surfaces.
+
 ::: warning Not an official Gittensor frontend
 The app adds maintainer workflow context around Gittensor participation. It does not replace the official Gittensor site or dashboard.
 :::
@@ -53,3 +67,4 @@ The app adds maintainer workflow context around Gittensor participation. It does
 3. Refresh installation health.
 4. Confirm comments and labels are enabled only when `Issues: write` is available.
 5. Confirm checks are off unless the repo explicitly opted into minimal check runs.
+6. Confirm `Issue comment` is subscribed if mention commands should work.
