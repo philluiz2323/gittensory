@@ -53,6 +53,8 @@
 
 - Add deterministic base-agent orchestrator (#14)
 
+- Add settings preview diagnostics
+
 
 
 ### Fixes
