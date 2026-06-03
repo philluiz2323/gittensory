@@ -93,6 +93,7 @@ import {
   enrichInstallationHealth,
   refreshContributorActivity,
   refreshInstallationHealth,
+  refreshInstallationHealthForInstallation,
 } from "../github/backfill";
 import { contributorRepoStatsFromGittensor, fetchGittensorContributorSnapshot } from "../gittensor/api";
 import { fetchPublicContributorProfile } from "../github/public";
@@ -183,6 +184,7 @@ import type {
   JobMessage,
   JsonValue,
   ProductUsageOutcome,
+  ProductUsageRole,
   ProductUsageSurface,
   PullRequestRecord,
   RepoSyncSegmentRecord,
@@ -198,6 +200,7 @@ async function recordRouteProductUsage(
   event: {
     surface: ProductUsageSurface;
     eventName: string;
+    role?: ProductUsageRole | string | null | undefined;
     outcome?: ProductUsageOutcome;
     identity?: AuthIdentity | null | undefined;
     actor?: string | null | undefined;
@@ -214,6 +217,7 @@ async function recordRouteProductUsage(
   await recordProductUsageEvent(c.env, {
     surface: event.surface,
     eventName: event.eventName,
+    role: event.role,
     route: c.req.path,
     actor: event.actor ?? event.identity?.actor,
     sessionId: event.sessionId ?? (event.identity?.kind === "session" ? event.identity.session.id : undefined),
@@ -650,6 +654,7 @@ export function createApp() {
     await recordRouteProductUsage(c, {
       surface: "browser_extension",
       eventName: "extension_session_created",
+      role: "maintainer",
       identity,
       sessionId: session.id,
       outcome: "success",
@@ -1444,10 +1449,8 @@ export function createApp() {
   app.post("/v1/installations/:id/repair/refresh", async (c) => {
     const installationId = Number(c.req.param("id"));
     if (!Number.isFinite(installationId)) return c.json({ error: "invalid_installation_id" }, 400);
-    const refreshed = await refreshInstallationHealth(c.env);
-    if (!refreshed.installations.some((installation) => installation.installationId === installationId)) {
-      return c.json({ error: "installation_not_found" }, 404);
-    }
+    const refreshed = await refreshInstallationHealthForInstallation(c.env, installationId);
+    if (!refreshed) return c.json({ error: "installation_not_found" }, 404);
     const health = await getInstallationHealth(c.env, installationId);
     if (!health) return c.json({ error: "installation_health_not_found" }, 404);
     return c.json({ ...(await buildInstallationRepairDiagnostics(c.env, health)), refreshed: true });
@@ -2830,10 +2833,11 @@ async function buildRepoOutcomePatternsResponse(env: Env, fullName: string) {
 
 async function buildRegistrationReadinessResponse(env: Env, fullName: string) {
   /* v8 ignore start -- Registration readiness route-level shaping over covered signal helpers. */
-  const [intelligence, settings, upstreamReports] = await Promise.all([
+  const [intelligence, settings, upstreamReports, focusManifest] = await Promise.all([
     buildRepoIntelligenceResponse(env, fullName),
     getRepositorySettings(env, fullName),
     listUpstreamDriftReports(env, 20),
+    loadRepoFocusManifest(env, fullName, { fetcher: async () => null }),
   ]);
   const repo = intelligence.repo;
   const installation = await loadInstallationHealthSummary(env, repo);
@@ -2849,6 +2853,7 @@ async function buildRegistrationReadinessResponse(env: Env, fullName: string) {
     contributorIntakeHealth: intelligence.contributorIntakeHealth as ReturnType<typeof buildContributorIntakeHealth>,
     installation,
     upstreamRegistryDriftWarnings: registryHyperparameterDriftWarningsForRepo(upstreamReports, fullName),
+    focusManifest,
   });
   return { ...report, dataQuality: intelligence.dataQuality };
   /* v8 ignore stop */
