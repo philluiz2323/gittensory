@@ -1613,7 +1613,17 @@ describe("queue processors", () => {
       autoLabelEnabled: false,
       checkRunMode: "off",
     });
-    const calls = { fetch: 0 };
+    const calls = { fetch: 0, repoWideReads: 0 };
+    const originalDb = env.DB;
+    env.DB = new Proxy(originalDb, {
+      get(target, prop, receiver) {
+        if (prop !== "prepare") return Reflect.get(target, prop, receiver);
+        return (sql: string) => {
+          if (/from\s+["`]?issues["`]?/i.test(sql) || /from\s+["`]?bounties["`]?/i.test(sql)) calls.repoWideReads += 1;
+          return target.prepare(sql);
+        };
+      },
+    }) as D1Database;
     vi.stubGlobal("fetch", async () => {
       calls.fetch += 1;
       return new Response("unexpected fetch", { status: 500 });
@@ -1631,7 +1641,7 @@ describe("queue processors", () => {
       },
     });
 
-    expect(calls.fetch).toBe(0);
+    expect(calls).toEqual({ fetch: 0, repoWideReads: 0 });
     const skipped = await env.DB.prepare("select actor, target_key, detail, metadata_json from audit_events where event_type = ?").bind("github_app.pr_visibility_skipped").all<{
       actor: string;
       target_key: string;
@@ -2031,6 +2041,83 @@ describe("queue processors", () => {
     );
     const cached = await env.DB.prepare("select status from official_miner_detections where login = ?").bind("newbie").first<{ status: string }>();
     expect(cached?.status).toBe("not_found");
+  });
+
+  it("checks official miner status for detected-only comments before publishing public output", async () => {
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    await upsertRepositorySettings(env, {
+      repoFullName: "JSONbored/gittensory",
+      commentMode: "detected_contributors_only",
+      publicAudienceMode: "oss_maintainer",
+      publicSurface: "comment_only",
+      autoLabelEnabled: false,
+      checkRunMode: "off",
+    });
+    await upsertPullRequestFromGitHub(env, "JSONbored/gittensory", {
+      number: 3,
+      title: "Cached historical work",
+      state: "closed",
+      merged_at: "2026-05-20T00:00:00.000Z",
+      user: { login: "confirmed-dev" },
+      labels: [],
+      body: "Historical cached PR.",
+    });
+
+    const calls = { minerList: 0, comments: 0 };
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      const method = init?.method ?? "GET";
+      if (url === "https://api.gittensor.io/miners") {
+        calls.minerList += 1;
+        return Response.json([
+          { githubUsername: "confirmed-dev", githubId: "123", totalPrs: 2, totalMergedPrs: 1, isEligible: true, credibility: 1 },
+        ]);
+      }
+      if (url === "https://api.gittensor.io/miners/123") return Response.json({ repositories: [] });
+      if (url === "https://api.gittensor.io/miners/123/prs") return Response.json([]);
+      if (url === "https://mirror.gittensor.io/api/v1/miners/123/issues") return Response.json({ issues: [] });
+      if (url.endsWith("/users/confirmed-dev")) return Response.json({ login: "confirmed-dev", public_repos: 1, followers: 0 });
+      if (url.includes("/users/confirmed-dev/repos")) return Response.json([]);
+      if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
+      if (url.includes("/issues/51/comments") && method === "GET") return Response.json([]);
+      if (url.includes("/issues/51/comments") && method === "POST") {
+        calls.comments += 1;
+        const body = JSON.parse(String(init?.body ?? "{}")) as { body?: string };
+        expect(body.body).toContain("[Gittensor profile](https://gittensor.io/miners/details?githubId=123)");
+        expect(body.body).toContain("2 PR(s)");
+        expect(body.body).not.toContain("Cached prior PRs/issues");
+        expect(body.body).not.toContain("api.gittensor.io/miners/123");
+        return Response.json({ id: 51 }, { status: 201 });
+      }
+      return new Response("not found", { status: 404 });
+    });
+
+    const basePayload = {
+      action: "opened",
+      installation: { id: 123, account: { login: "JSONbored", id: 1, type: "User" } },
+      repository: { name: "gittensory", full_name: "JSONbored/gittensory", private: true, owner: { login: "JSONbored" } },
+    };
+
+    await processJob(env, {
+      type: "github-webhook",
+      deliveryId: "detected-comment-confirmed",
+      eventName: "pull_request",
+      payload: {
+        ...basePayload,
+        pull_request: { number: 51, title: "Confirmed contributor work", state: "open", user: { login: "confirmed-dev" }, labels: [], body: "Fixes #1" },
+      },
+    });
+    await processJob(env, {
+      type: "github-webhook",
+      deliveryId: "detected-comment-not-found",
+      eventName: "pull_request",
+      payload: {
+        ...basePayload,
+        pull_request: { number: 52, title: "Unconfirmed contributor work", state: "open", user: { login: "newbie" }, labels: [], body: "Fixes #1" },
+      },
+    });
+
+    expect(calls).toEqual({ minerList: 2, comments: 1 });
   });
 
   it("fails closed when official miner detection is unavailable", async () => {
