@@ -50,6 +50,8 @@ export const repositorySettings = sqliteTable("repository_settings", {
   duplicatePrGateMode: text("duplicate_pr_gate_mode").notNull().default("block"),
   qualityGateMode: text("quality_gate_mode").notNull().default("advisory"),
   qualityGateMinScore: integer("quality_gate_min_score"),
+  aiReviewMode: text("ai_review_mode").notNull().default("off"),
+  aiReviewByok: integer("ai_review_byok", { mode: "boolean" }).notNull().default(false),
   autoLabelEnabled: integer("auto_label_enabled", { mode: "boolean" }).notNull().default(true),
   gittensorLabel: text("gittensor_label").notNull().default("gittensor"),
   createMissingLabel: integer("create_missing_label", { mode: "boolean" }).notNull().default(true),
@@ -59,6 +61,22 @@ export const repositorySettings = sqliteTable("repository_settings", {
   backfillEnabled: integer("backfill_enabled", { mode: "boolean" }).notNull().default(true),
   privateTrustEnabled: integer("private_trust_enabled", { mode: "boolean" }).notNull().default(true),
   commandAuthorizationJson: text("command_authorization_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull().$defaultFn(() => nowIso()),
+  updatedAt: text("updated_at").notNull().$defaultFn(() => nowIso()),
+});
+
+// Maintainer BYOK provider keys (Anthropic/OpenAI), encrypted at rest with AES-256-GCM. Isolated in its
+// own table so the ciphertext is NEVER serialized by the repository-settings GET surface. The plaintext
+// key is never stored; `last4` is a display-only hint derived from the plaintext at write time.
+export const repositoryAiKeys = sqliteTable("repository_ai_keys", {
+  repoFullName: text("repo_full_name").primaryKey(),
+  provider: text("provider").notNull(),
+  ciphertext: text("ciphertext").notNull(),
+  iv: text("iv").notNull(),
+  keyVersion: integer("key_version").notNull().default(1),
+  model: text("model"),
+  last4: text("last4").notNull(),
+  createdBy: text("created_by"),
   createdAt: text("created_at").notNull().$defaultFn(() => nowIso()),
   updatedAt: text("updated_at").notNull().$defaultFn(() => nowIso()),
 });
