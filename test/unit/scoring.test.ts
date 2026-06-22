@@ -343,6 +343,27 @@ MAX_CODE_DENSITY_MULTIPLIER = 1.15
     expect(preview.privateOnly).toBe(true);
   });
 
+  it("applies penalty label multipliers (< 1) instead of flooring them to the neutral default", () => {
+    const baseInput = {
+      repoFullName: repo.fullName,
+      sourceTokenScore: 60,
+      totalTokenScore: 90,
+      sourceLines: 50,
+      openPrCount: 0,
+      credibility: 1,
+    } as const;
+    // repo fixture: labelMultipliers { bug: 1.2, refactor: 0.5 }.
+    const penalty = buildScorePreview({ repo, snapshot, input: { ...baseInput, labels: ["refactor"] } });
+    const neutral = buildScorePreview({ repo, snapshot, input: { ...baseInput, labels: ["unmatched"] } });
+    const mixed = buildScorePreview({ repo, snapshot, input: { ...baseInput, labels: ["bug", "refactor"] } });
+
+    expect(penalty.scoreEstimate.labelMultiplier).toBe(0.5); // was floored to 1 before the fix
+    expect(neutral.scoreEstimate.labelMultiplier).toBe(1);
+    expect(mixed.scoreEstimate.labelMultiplier).toBe(1.2); // highest matched still wins for a bonus+penalty PR
+    // The penalty actually bites: the merged-score estimate is half the neutral one.
+    expect(penalty.scoreEstimate.estimatedMergedScore).toBeCloseTo(neutral.scoreEstimate.estimatedMergedScore * 0.5, 5);
+  });
+
   it("falls back to a neutral label multiplier when repo defaults are zeroed", () => {
     const preview = buildScorePreview({
       repo: { ...repo, registryConfig: { ...repo.registryConfig!, defaultLabelMultiplier: 0, labelMultipliers: {} } },

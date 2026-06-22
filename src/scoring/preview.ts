@@ -735,10 +735,12 @@ function deltaExplanationFor(core: ScoreCore, blockedBy: ScoreGateBlocker[]): st
 
 function selectLabelMultiplier(labels: string[], multipliers: Record<string, number>, fallback: number): number {
   const normalized = new Set(labels.map((label) => label.toLowerCase()));
-  return Math.max(
-    fallback || 1,
-    ...Object.entries(multipliers).flatMap(([label, multiplier]) => (normalized.has(label.toLowerCase()) ? [multiplier] : [])),
-  );
+  const matched = Object.entries(multipliers).flatMap(([label, multiplier]) => (normalized.has(label.toLowerCase()) ? [multiplier] : []));
+  // Honour matched label multipliers even when < 1 (penalty labels like refactor/docs). The matched set must
+  // NOT be maxed against the neutral (>=1) fallback, or a sub-1 penalty would be floored to 1 and never bite;
+  // the highest matched multiplier still wins when a PR carries both a bonus and a penalty label. Only an
+  // unmatched PR falls back to the neutral default.
+  return matched.length > 0 ? Math.max(...matched) : fallback || 1;
 }
 
 function decideLinkedIssueMultiplier(
