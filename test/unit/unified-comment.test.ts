@@ -197,6 +197,25 @@ describe("renderUnifiedReviewComment", () => {
     expect(md).toContain("- lint — 2 errors in src/foo.ts");
   });
 
+  it("de-duplicates repeated failing check names in the details path (matching the bare-names path)", () => {
+    const md = renderUnifiedReviewComment(
+      {
+        ...base,
+        readiness: {
+          ciState: "failed",
+          failingDetails: [
+            { name: "codecov/patch", summary: "60% of diff hit (target 97%)" },
+            { name: "codecov/patch", summary: "60% of diff hit (target 97%)" },
+            { name: "lint", summary: "2 errors in src/foo.ts" },
+          ],
+        },
+      },
+      {},
+    );
+    expect((md.match(/- codecov\/patch/g) ?? []).length).toBe(1);
+    expect((md.match(/- lint/g) ?? []).length).toBe(1);
+  });
+
   it("falls back to bare failing check names when no per-check detail is present (FIX D3)", () => {
     const md = renderUnifiedReviewComment({ ...base, readiness: { ciState: "failed", failingChecks: ["build", "e2e"] } }, {});
     expect(md).toContain("CI checks failing");

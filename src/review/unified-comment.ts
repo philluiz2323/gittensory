@@ -336,10 +336,16 @@ function failingChecksBlock(readiness: MergeReadiness | undefined): string {
   if (!readiness || readiness.ciState !== "failed") return "";
   const details = readiness.failingDetails ?? [];
   if (details.length > 0) {
+    // A check name can arrive more than once (a check-run and a same-named status context, or repeated
+    // contexts across pages), so dedupe by name — keeping the first entry's reason — exactly like the
+    // bare-names fallback below, which already collapses duplicates with a Set.
+    const seen = new Set<string>();
     const lines = details
       .map((detail) => {
-        const name = escapePublicHtmlAngles(detail.name.trim());
-        if (!name) return "";
+        const trimmed = detail.name.trim();
+        const name = escapePublicHtmlAngles(trimmed);
+        if (!name || seen.has(trimmed)) return "";
+        seen.add(trimmed);
         const reason = detail.summary?.trim() ? ` — ${escapePublicHtmlAngles(detail.summary.trim())}` : "";
         return `- ${name}${reason}`;
       })
