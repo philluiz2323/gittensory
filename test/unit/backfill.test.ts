@@ -433,6 +433,8 @@ describe("GitHub backfill", () => {
       missingEvents: [],
       optionalVisibleEvents: expect.arrayContaining(["installation_repositories"]),
     });
+    // Repair steps must follow the recomputed status, not the pre-normalization input status.
+    expect(health.repairSteps).toEqual(["No repair needed."]);
   });
 
   it("requires Checks write only for repos with check runs enabled", async () => {

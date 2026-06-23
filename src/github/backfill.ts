@@ -745,7 +745,7 @@ export function enrichInstallationHealth(health: InstallationHealthRecord) {
       action: missingEvents.has(event) ? `Subscribe to the ${event} webhook event.` : "No change needed.",
     })),
     repairSteps:
-      health.status === "healthy"
+      status === "healthy"
         ? ["No repair needed."]
         : [
             "Update the GitHub App permissions and subscribed events.",
