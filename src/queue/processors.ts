@@ -66,6 +66,8 @@ import {
   fetchAndStorePullRequestFilesForReview,
   fetchLiveCiAggregate,
   fetchLivePullRequestMergeState,
+  fetchLivePullRequestReviewDecision,
+  fetchRequiredStatusContexts,
   refreshContributorActivity,
   refreshInstallationHealth,
   refreshPullRequestDetails,
@@ -86,6 +88,7 @@ import {
   sanitizePublicComment,
 } from "../github/commands";
 import { ensurePullRequestLabel, removePullRequestLabel } from "../github/labels";
+import { updatePullRequestBranch } from "../github/pr-actions";
 import { ALL_TYPE_LABELS, resolvePrTypeLabel } from "../settings/pr-type-label";
 import { fetchPublicContributorProfile } from "../github/public";
 import { refreshRegistry } from "../registry/sync";
@@ -614,14 +617,22 @@ async function maybeRunAgentMaintenance(
   // planner uses this to NEVER approve/merge a PR whose CI isn't green, to CLOSE a red-CI non-owner PR (citing
   // the failing checks) / HOLD the owner's, and to DEFER entirely while CI is still pending.
   const ciToken = await createInstallationToken(env, installationId).catch(() => undefined);
-  const [changedFiles, hardGuardrailGlobs, ciAggregate, liveMergeState] = await Promise.all([
+  const [changedFiles, hardGuardrailGlobs, requiredContexts, liveMergeState, liveReviewDecision] = await Promise.all([
     resolvePullRequestFilesForReview(env, { installationId, repoFullName, pullNumber: pr.number }),
     loadHardGuardrailGlobs(env, repoFullName),
-    fetchLiveCiAggregate(env, repoFullName, pr.headSha, ciToken ?? env.GITHUB_PUBLIC_TOKEN),
+    // RC2: branch-protection REQUIRED status contexts, so only a required red check gates the PR (a red
+    // codecov/* is surfaced but never blocks merge/approve or forces request_changes). null ⇒ fold all red.
+    fetchRequiredStatusContexts(env, repoFullName, pr.baseRef ?? args.repo?.defaultBranch, ciToken ?? env.GITHUB_PUBLIC_TOKEN),
     // Live mergeable_state — the stored one lags GitHub's async recompute after the bot's own approve, which
     // otherwise leaves a green+approved PR stuck OPEN at mergeState=CLEAN (never auto-merged).
     fetchLivePullRequestMergeState(env, repoFullName, pr.number, ciToken ?? env.GITHUB_PUBLIC_TOKEN),
+    // RC1: live reviewDecision so the approve/request-changes dedup is accurate. The STORED reviewDecision is
+    // only written by the open-PR backfill and goes stale → the planner re-posted a review every cycle (the
+    // re-review loop with 14-23 stacked reviews). With the live value, an already-approved/changes-requested PR
+    // is not re-reviewed for the same state.
+    fetchLivePullRequestReviewDecision(env, repoFullName, pr.number, ciToken ?? env.GITHUB_PUBLIC_TOKEN),
   ]);
+  const ciAggregate = await fetchLiveCiAggregate(env, repoFullName, pr.headSha, ciToken ?? env.GITHUB_PUBLIC_TOKEN, requiredContexts);
   const changedPaths = changedPathsForGuardrail(changedFiles);
   const repoOwner = repoFullName.includes("/") ? repoFullName.slice(0, repoFullName.indexOf("/")) : "";
   const authorLogin = pr.authorLogin ?? "";
@@ -642,10 +653,12 @@ async function maybeRunAgentMaintenance(
     failingCheckNames: ciAggregate.failingDetails.map((detail) => detail.name),
     pr: {
       mergeableState: liveMergeState ?? pr.mergeableState,
-      reviewDecision: pr.reviewDecision,
+      reviewDecision: liveReviewDecision ?? pr.reviewDecision,
       slopRisk: pr.slopRisk,
       labels: pr.labels,
       linkedDuplicateCount: linkedIssueDuplicatePullRequestsForGate(pr, otherOpenPullRequests).length,
+      headSha: pr.headSha,
+      mergeBlockedSha: pr.mergeBlockedSha,
     },
   });
   if (planned.length === 0) return;
@@ -664,6 +677,7 @@ async function maybeRunAgentMaintenance(
       agentPaused: settings.agentPaused,
       agentDryRun: settings.agentDryRun,
       installationPermissions,
+      authorLogin: pr.authorLogin,
     },
     planned,
   );
@@ -679,6 +693,26 @@ async function reReviewStoredPullRequest(env: Env, deliveryId: string, installat
   const [repo, settings] = await Promise.all([getRepository(env, repoFullName), resolveRepositorySettings(env, repoFullName)]);
   const pr = await getPullRequest(env, repoFullName, prNumber);
   if (!pr || pr.state !== "open") return;
+  // Rebase-if-behind BEFORE reviewing (reviewbot parity): if the branch is BEHIND base, issue update-branch so
+  // the fresh review + required CI run against the merged result. The rebase creates a new head → a synchronize
+  // webhook (or the next sweep) re-reviews it; skip the rest of THIS pass so we never review/act on the stale
+  // head. Best-effort: a dirty/conflicting branch (422) is left for the gate to close, not rebased here.
+  if (isAgentConfigured(settings.autonomy) && !pr.isDraft && pr.headSha) {
+    const rebaseToken = await createInstallationToken(env, installationId).catch(() => undefined);
+    const liveMergeState = rebaseToken ? await fetchLivePullRequestMergeState(env, repoFullName, prNumber, rebaseToken) : undefined;
+    if (liveMergeState === "behind") {
+      const rebased = await updatePullRequestBranch(env, installationId, repoFullName, prNumber, pr.headSha)
+        .then(() => true)
+        .catch((error) => {
+          console.log(JSON.stringify({ ev: "rebase_failed", repoFullName, pull: prNumber, message: errorMessage(error).slice(0, 120) }));
+          return false;
+        });
+      if (rebased) {
+        await recordAuditEvent(env, { eventType: "github_app.pr_branch_updated", actor: "gittensory", targetKey: `${repoFullName}#${prNumber}`, outcome: "completed", detail: "behind base; update-branch issued before review", metadata: { deliveryId, repoFullName } }).catch(() => undefined);
+        return; // the rebase fires a synchronize → fresh review runs on the new head
+      }
+    }
+  }
   const otherOpenPullRequests = await listOtherOpenPullRequests(env, repoFullName, prNumber);
   const advisory = buildPullRequestAdvisory(repo, pr, { otherOpenPullRequests, requireLinkedIssue: shouldCollectLinkedIssueEvidence(settings) });
   await persistAdvisory(env, advisory);
@@ -2017,28 +2051,48 @@ async function maybePublishPrPublicSurface(
       await recordNativeGateDecision(env, { project: repoFullName, pullNumber: pr.number, headSha: pr.headSha, conclusion: gateEvaluation.conclusion, reasonCode });
     }
     if (gateEnabled) {
-      const gateCheckResult = await createOrUpdateGateCheckRun(
-        env,
-        installationId,
-        repoFullName,
-        advisory,
-        gatePolicy,
-        {
-          checkRunId: pendingGateCheckRunId,
-        },
-      );
-      if (gateCheckResult?.kind === "published") gateFinalized = true;
-      if (gateCheckResult?.kind === "permission_missing") {
-        await auditGateCheckPermissionMissing(env, author, repoFullName, pr.number, webhook.deliveryId, gateCheckResult.warning);
-        // A 403 on the COMPLETION call is classified as permission_missing and does NOT throw, so the catch
-        // below never runs and the pending in_progress check would be orphaned. But the pending check already
-        // posted (pendingGateCheckRunId is set), proving the App had Checks:write — so a 403 here is almost
-        // always a transient secondary-rate-limit, not a real revocation. Finalize the pending check to
-        // neutral (mirrors the catch); if it were a genuine revocation this PATCH also 403s and is swallowed.
+      try {
+        const gateCheckResult = await createOrUpdateGateCheckRun(
+          env,
+          installationId,
+          repoFullName,
+          advisory,
+          gatePolicy,
+          {
+            checkRunId: pendingGateCheckRunId,
+          },
+        );
+        if (gateCheckResult?.kind === "published") gateFinalized = true;
+        if (gateCheckResult?.kind === "permission_missing") {
+          await auditGateCheckPermissionMissing(env, author, repoFullName, pr.number, webhook.deliveryId, gateCheckResult.warning);
+          // A 403 on the COMPLETION call is classified as permission_missing and does NOT throw, so the catch
+          // below never runs and the pending in_progress check would be orphaned. But the pending check already
+          // posted (pendingGateCheckRunId is set), proving the App had Checks:write — so a 403 here is almost
+          // always a transient secondary-rate-limit, not a real revocation. Finalize the pending check to
+          // neutral (mirrors the catch); if it were a genuine revocation this PATCH also 403s and is swallowed.
+          if (pendingGateCheckRunId !== undefined && !gateFinalized) {
+            await createOrUpdateErroredGateCheckRun(env, installationId, repoFullName, advisory, { checkRunId: pendingGateCheckRunId }).catch(() => undefined);
+            gateFinalized = true;
+          }
+        }
+      } catch (checkError) {
+        // CRITICAL: a check-run API failure (e.g. a 422 from an over-long output.title) must NEVER abort the
+        // review. The outer catch re-throws → the comment, the audit row, and the auto-action (merge/close)
+        // would all be skipped and the review dead-lettered. That is exactly why red-CI PRs (whose gate title
+        // grew long with failing-check names) were silently never reviewed or closed. Finalize the pending
+        // check to a neutral terminal state so it doesn't hang, log, and CONTINUE — do not re-throw.
         if (pendingGateCheckRunId !== undefined && !gateFinalized) {
           await createOrUpdateErroredGateCheckRun(env, installationId, repoFullName, advisory, { checkRunId: pendingGateCheckRunId }).catch(() => undefined);
           gateFinalized = true;
         }
+        await recordAuditEvent(env, {
+          eventType: "github_app.gate_check_failed_nonfatal",
+          actor: author,
+          targetKey: `${repoFullName}#${pr.number}`,
+          outcome: "error",
+          detail: errorMessage(checkError),
+          metadata: { deliveryId: webhook.deliveryId, repoFullName },
+        }).catch(() => undefined);
       }
     }
   } catch (error) {
@@ -2144,7 +2198,9 @@ async function maybePublishPrPublicSurface(
       // auto-maintain planner uses so the public chip and the disposition can never disagree. "pending" folds to
       // the "unverified" bucket for the 3-state comment chip (renders "CI pending").
       const ciToken = await createInstallationToken(env, installationId).catch(() => undefined);
-      const liveCi = await fetchLiveCiAggregate(env, repoFullName, pr.headSha, ciToken ?? env.GITHUB_PUBLIC_TOKEN);
+      // RC2: only branch-protection-required checks gate the PR; a red codecov/* is surfaced but never blocks.
+      const requiredContexts = await fetchRequiredStatusContexts(env, repoFullName, pr.baseRef ?? repo?.defaultBranch, ciToken ?? env.GITHUB_PUBLIC_TOKEN);
+      const liveCi = await fetchLiveCiAggregate(env, repoFullName, pr.headSha, ciToken ?? env.GITHUB_PUBLIC_TOKEN, requiredContexts);
       const ciState: MergeReadiness["ciState"] = liveCi.ciState === "passed" ? "passed" : liveCi.ciState === "failed" ? "failed" : "unverified";
       // Per-failed-check WHY (codecov %/test/lint reason) from each check-run output or commit-status
       // description — capped + public-safe (name + short reason only). The renderer lists these under the CI chip.
