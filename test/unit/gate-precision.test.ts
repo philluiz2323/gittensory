@@ -96,6 +96,20 @@ describe("buildGatePrecisionReport", () => {
     // Only owner/repo's single block counts; other/repo's block + merged PR (and the null-repo PR) are filtered out.
     expect(report.overall).toMatchObject({ blocked: 1, blockedThenMerged: 1 });
   });
+
+  it("does not match an outcome to a same-numbered PR in a different repo when called unscoped", () => {
+    // PR numbers are unique only within a repo. The only block belongs to owner/repo#1, which was CLOSED
+    // (the block held → not a false positive). A bare-number index would collide with other/repo#1 (MERGED)
+    // and wrongly report a blocked-then-merged false positive.
+    const blocked = { repoFullName: "owner/repo", pullNumber: 1, blockerCodes: ["x"], overridden: false };
+    const ownClosed: PullRequestRecord = { repoFullName: "owner/repo", number: 1, title: "owner PR 1", state: "closed", mergedAt: null, labels: [], linkedIssues: [] };
+    const otherMerged: PullRequestRecord = { repoFullName: "other/repo", number: 1, title: "other PR 1", state: "closed", mergedAt: "2026-06-01T00:00:00.000Z", labels: [], linkedIssues: [] };
+    // A PR with a null repoFullName exercises prKey's nullish-coalesce guard on the unscoped indexing path.
+    const nullRepoPr: PullRequestRecord = { repoFullName: null as unknown as string, number: 2, title: "null repo PR", state: "open", mergedAt: null, labels: [], linkedIssues: [] };
+    const report = buildGatePrecisionReport([blocked], [otherMerged, ownClosed, nullRepoPr]);
+    expect(report.overall).toMatchObject({ blocked: 1, blockedThenMerged: 0 });
+    expect(report.perGateType[0]).toMatchObject({ gateType: "x", blocked: 1, blockedThenMerged: 0 });
+  });
 });
 
 describe("buildGatePrecisionSignals", () => {

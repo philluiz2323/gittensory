@@ -54,6 +54,11 @@ function sameRepo(a: string | null | undefined, b: string): boolean {
   return (a ?? "").toLowerCase() === b.toLowerCase();
 }
 
+// PR numbers are unique only within a repo, so index by repo+number to keep distinct repos' PRs apart.
+function prKey(repoFullName: string | null | undefined, pullNumber: number): string {
+  return `${(repoFullName ?? "").toLowerCase()}#${pullNumber}`;
+}
+
 /**
  * Per-gate-type false-positive measurement over recorded gate blocks. Pure. For each block row we look up the
  * PR's terminal outcome; a blocked PR that later MERGED is a false positive. Each blocker `code` on the row
@@ -67,11 +72,13 @@ export function buildGatePrecisionReport(
   options: { repoFullName?: string } = {},
 ): Omit<GatePrecisionReport, "repoFullName" | "generatedAt" | "windowDays"> {
   const repoFullName = options.repoFullName;
-  // Index PRs by number for an O(1) terminal-outcome lookup, scoped to the repo when one is given.
-  const prByNumber = new Map<number, PullRequestRecord>();
+  // Index PRs by repo+number for an O(1) terminal-outcome lookup, scoped to the repo when one is given.
+  // An unscoped call sees multi-repo data, so keying by bare number would let two repos sharing a PR
+  // number collide — the last-written PR would win and be matched to another repo's outcome.
+  const prByNumber = new Map<string, PullRequestRecord>();
   for (const pr of pullRequests) {
     if (repoFullName && !sameRepo(pr.repoFullName, repoFullName)) continue;
-    prByNumber.set(pr.number, pr);
+    prByNumber.set(prKey(pr.repoFullName, pr.number), pr);
   }
   const scoped = repoFullName ? outcomes.filter((o) => sameRepo(o.repoFullName, repoFullName)) : outcomes;
 
@@ -79,7 +86,7 @@ export function buildGatePrecisionReport(
   let overallBlocked = 0;
   let overallMerged = 0;
   for (const outcome of scoped) {
-    const pr = prByNumber.get(outcome.pullNumber);
+    const pr = prByNumber.get(prKey(outcome.repoFullName, outcome.pullNumber));
     // A blocked PR that later MERGED is a false positive; closed/open are not (the block held or is unresolved).
     const merged = pr ? terminalOutcome(pr) === "merged" : false;
     overallBlocked += 1;
