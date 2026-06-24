@@ -472,6 +472,28 @@ NOVELTY_BONUS_SCALAR = 3
     expect(JSON.stringify(preview.scoreEstimate)).not.toMatch(/reward estimate|wallet|hotkey|farming|payout/i);
   });
 
+  it("falls back to neutral credibility when any cached evidence count is non-finite (no NaN poisoning)", () => {
+    const baseInput = { repoFullName: repo.fullName, sourceTokenScore: 60, totalTokenScore: 60, sourceLines: 50, openPrCount: 0 };
+    // A malformed stale count must not poison the score with NaN — the guard falls back to neutral 0.8.
+    const malformed = buildScorePreview({
+      repo,
+      snapshot,
+      input: baseInput,
+      contributorEvidence: { login: "dev", payload: { mergedPullRequests: 5, stalePullRequests: "n/a" }, generatedAt: "2026-06-01T00:00:00.000Z" },
+    });
+    expect(malformed.gates.credibilityObserved).toBe(0.8);
+    expect(Number.isNaN(malformed.scoreEstimate.estimatedMergedScore)).toBe(false);
+
+    // A well-formed payload exercises the arithmetic branch (0.75 + 5*0.04 - 1*0.03 - 0*0.02 = 0.92).
+    const wellFormed = buildScorePreview({
+      repo,
+      snapshot,
+      input: baseInput,
+      contributorEvidence: { login: "dev", payload: { mergedPullRequests: 5, stalePullRequests: 1, unlinkedPullRequests: 0 }, generatedAt: "2026-06-01T00:00:00.000Z" },
+    });
+    expect(wellFormed.gates.credibilityObserved).toBeCloseTo(0.92, 5);
+  });
+
   it("projects the saturation-model score with the full contribution bonus for density-era snapshots", () => {
     const densitySnapshot: ScoringModelSnapshotRecord = {
       ...snapshot,

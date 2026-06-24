@@ -965,7 +965,9 @@ function inferCredibility(evidence?: ContributorEvidenceRecord | null): number {
   const merged = Number(payload?.mergedPullRequests ?? 0);
   const stale = Number(payload?.stalePullRequests ?? 0);
   const unlinked = Number(payload?.unlinkedPullRequests ?? 0);
-  if (!Number.isFinite(merged)) return 0.8;
+  // payload is Record<string, JsonValue>, so any of these counts can be a non-numeric cached value.
+  // Guard all three — a non-finite stale/unlinked would otherwise yield NaN and poison the whole score.
+  if (!Number.isFinite(merged) || !Number.isFinite(stale) || !Number.isFinite(unlinked)) return 0.8;
   return clamp(0.75 + merged * 0.04 - stale * 0.03 - unlinked * 0.02, 0.25, 1);
 }
 
